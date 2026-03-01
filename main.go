@@ -11,6 +11,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -72,17 +73,21 @@ func main() {
 	}
 }
 
-// trackFocus tails the acme log indefinitely, restarting on error.
+// trackFocus tails the acme log indefinitely, reconnecting on hard errors.
 func trackFocus() {
 	for {
 		if err := watchLog(); err != nil {
-			log.Printf("acme log: %v; retrying in 1s", err)
+			log.Printf("acme log: %v; retrying in 500ms", err)
+			time.Sleep(500 * time.Millisecond)
 		}
-		time.Sleep(time.Second)
 	}
 }
 
-// watchLog opens the acme log and reads events until an error occurs.
+// watchLog opens the acme log and reads events until a hard error occurs.
+// Plan9port's acme log may return io.EOF when its ring buffer is momentarily
+// empty rather than blocking.  We treat EOF as "no event right now" and
+// retry the read on the same open connection; the next Tread will block
+// until a new event (mouse-over focus change, window creation, etc.) arrives.
 func watchLog() error {
 	alog, err := acme.Log()
 	if err != nil {
@@ -91,6 +96,11 @@ func watchLog() error {
 	defer alog.Close()
 	for {
 		ev, err := alog.Read()
+		if err == io.EOF {
+			// Transient empty buffer — retry on same connection.
+			time.Sleep(time.Millisecond)
+			continue
+		}
 		if err != nil {
 			return err
 		}
@@ -99,8 +109,7 @@ func watchLog() error {
 			focused.Store(int64(ev.ID))
 			focusedOnce.Do(func() { close(focusedReady) })
 		case "del":
-			// If the deleted window was the one we're tracking, clear it
-			// so callers get 0 (no focused window) rather than a stale ID.
+			// If the deleted window was the one we're tracking, clear it.
 			focused.CompareAndSwap(int64(ev.ID), 0)
 		}
 	}

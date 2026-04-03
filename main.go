@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"os"
 	"os/signal"
 	"sync"
@@ -22,7 +21,7 @@ import (
 	"time"
 
 	"9fans.net/go/acme"
-	"9fans.net/go/plan9/client"
+	"github.com/cptaffe/p9srv"
 )
 
 // focused holds the ID of the currently focused acme window.
@@ -38,17 +37,13 @@ func main() {
 	log.SetPrefix("acme-focused: ")
 	log.SetFlags(log.Ltime)
 
-	srvPath := client.Namespace() + "/acme-focused"
-	os.Remove(srvPath)
-
-	l, err := net.Listen("unix", srvPath)
+	l, cleanup, err := p9srv.ListenUnix("acme-focused")
 	if err != nil {
-		log.Fatalf("listen %s: %v", srvPath, err)
+		log.Fatalf("listen: %v", err)
 	}
-	defer l.Close()
-	defer os.Remove(srvPath)
+	defer cleanup()
 
-	fmt.Fprintln(os.Stderr, "acme-focused: listening on", srvPath)
+	fmt.Fprintln(os.Stderr, "acme-focused: listening on", p9srv.ServicePath("acme-focused"))
 
 	// Track the focused window by tailing the acme log.
 	go trackFocus()
@@ -58,7 +53,7 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigCh
-		os.Remove(srvPath)
+		cleanup()
 		os.Exit(0)
 	}()
 

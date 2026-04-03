@@ -3,13 +3,14 @@
 // It watches the acme log for "focus" events and exposes the current focused
 // window ID as a single file in a 9P filesystem posted to $NAMESPACE/acme-focused:
 //
-//	% 9p -a unix!$NAMESPACE/acme-focused read focus
+//	% 9p read acme-focused/focus
 //	42
 //
 // Designed to run as a launchd agent; see zip.connor.acmefocused.plist.
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -21,6 +22,7 @@ import (
 	"time"
 
 	"9fans.net/go/acme"
+	"9fans.net/go/plan9/srv9p"
 	"github.com/cptaffe/p9srv"
 )
 
@@ -33,22 +35,47 @@ var (
 	focusedReady = make(chan struct{})
 )
 
+func buildServer() *srv9p.Server {
+	tree := srv9p.NewTree("", "", 0555, nil)
+	focusFile, err := tree.Root.Create("focus", "", 0444, nil)
+	if err != nil {
+		panic(err) // impossible: fresh tree
+	}
+
+	return &srv9p.Server{
+		Tree: tree,
+		Open: func(_ context.Context, fid *srv9p.Fid, _ uint8) error {
+			if fid.File() == focusFile {
+				// Non-blocking: if no focus event yet, return 0.
+				select {
+				case <-focusedReady:
+				default:
+				}
+				fid.SetAux(fmt.Sprintf("%d\n", focused.Load()))
+			}
+			return nil
+		},
+		Read: func(_ context.Context, fid *srv9p.Fid, data []byte, offset int64) (int, error) {
+			s, _ := fid.Aux().(string)
+			return fid.ReadString(data, offset, s)
+		},
+	}
+}
+
 func main() {
 	log.SetPrefix("acme-focused: ")
 	log.SetFlags(log.Ltime)
 
-	l, cleanup, err := p9srv.ListenUnix("acme-focused")
+	rw, cleanup, err := p9srv.Post("acme-focused")
 	if err != nil {
-		log.Fatalf("listen: %v", err)
+		log.Fatalf("post: %v", err)
 	}
 	defer cleanup()
 
-	fmt.Fprintln(os.Stderr, "acme-focused: listening on", p9srv.ServicePath("acme-focused"))
+	log.Printf("serving at %s", p9srv.ServicePath("acme-focused"))
 
-	// Track the focused window by tailing the acme log.
 	go trackFocus()
 
-	// Clean up on signal.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
@@ -57,15 +84,7 @@ func main() {
 		os.Exit(0)
 	}()
 
-	srv := &Server{}
-	for {
-		c, err := l.Accept()
-		if err != nil {
-			log.Printf("accept: %v", err)
-			continue
-		}
-		go srv.handleConn(c)
-	}
+	buildServer().Serve(rw, rw)
 }
 
 // trackFocus tails the acme log indefinitely, reconnecting on hard errors.
@@ -79,10 +98,6 @@ func trackFocus() {
 }
 
 // watchLog opens the acme log and reads events until a hard error occurs.
-// Plan9port's acme log may return io.EOF when its ring buffer is momentarily
-// empty rather than blocking.  We treat EOF as "no event right now" and
-// retry the read on the same open connection; the next Tread will block
-// until a new event (mouse-over focus change, window creation, etc.) arrives.
 func watchLog() error {
 	alog, err := acme.Log()
 	if err != nil {
@@ -92,7 +107,6 @@ func watchLog() error {
 	for {
 		ev, err := alog.Read()
 		if err == io.EOF {
-			// Transient empty buffer — retry on same connection.
 			time.Sleep(time.Millisecond)
 			continue
 		}
@@ -104,7 +118,6 @@ func watchLog() error {
 			focused.Store(int64(ev.ID))
 			focusedOnce.Do(func() { close(focusedReady) })
 		case "del":
-			// If the deleted window was the one we're tracking, clear it.
 			focused.CompareAndSwap(int64(ev.ID), 0)
 		}
 	}

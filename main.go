@@ -6,7 +6,7 @@
 //	% 9p read acme-focused/focus
 //	42
 //
-// Designed to run as a launchd agent; see zip.connor.acmefocused.plist.
+// Designed to run under 9init; see the acme-focused.rc service in ~/lib/9init.
 package main
 
 import (
